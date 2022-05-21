@@ -1,3 +1,4 @@
+from doctest import master
 from torchvision import transforms, datasets
 import torch_xla.core.xla_model as xm
 from torch.utils.data import DataLoader, DistributedSampler
@@ -178,12 +179,15 @@ def train(args):
             output = model(img)
 
             loss = criterion(output, target)
+            pred_class = output.argmax(dim=1)
+            acc = pred_class.eq(target.view_as(pred_class)).sum() / img.shape[0]
+
             optimizer.zero_grad()
             loss.backward()
             xm.optimizer_step(optimizer)
 
-            tracker.add(train_loss=loss)
-            if indx % args.log_freq and master_ordinal:
+            tracker.add(train_loss=loss, train_acc=acc)
+            if indx % args.log_freq == 0 and master_ordinal:
                 tracker.print(indx/len(train_loader))
         tracker.print(1)
 
@@ -198,7 +202,7 @@ def train(args):
             acc = pred_class.eq(target.view_as(pred_class)).sum() / img.shape[0]
 
             tracker.add(val_loss=loss, val_acc=acc)
-            if indx % args.log_freq and master_ordinal:
+            if indx % args.log_freq == 0 and master_ordinal:
                 tracker.print(indx/len(val_loader), msg="")
         metrics = tracker.get(True)
         tracker.print(1, msg=tracker.msg(metrics))
@@ -212,7 +216,7 @@ def train(args):
             print(f"epoch: {epoch}")
             print("---------------")
         train_epoch(train_device_loader)
-        if epoch % args.val_freq or epoch == args.n_epochs - 1:
+        if epoch % args.val_freq == 0 or epoch == args.n_epochs - 1:
             metrics = val(val_device_loader)
             if metrics["val_acc"] > best_val and master_ordinal:
                 print(
