@@ -55,7 +55,7 @@ def get_loader(dataset, batch_size, n_workers):
             dataset["train"], num_replicas=xm.xrt_world_size(), rank=xm.get_ordinal(), shuffle=True
         )
         sampler["val"] = DistributedSampler(
-            dataset["test"], num_replicas=xm.xrt_world_size(), rank=xm.get_ordinal(), shuffle=False
+            dataset["val"], num_replicas=xm.xrt_world_size(), rank=xm.get_ordinal(), shuffle=False
         )
     loader = {}
     loader["train"] = DataLoader(
@@ -170,7 +170,7 @@ def train(args):
     lr_scheduler = get_lr_scheduler(args.lr_sched, optimizer, args.n_epochs)
     criterion = nn.CrossEntropyLoss()
     tracker = RunningMeter()
-    master_ordinal = xm.get_ordinal() == 0
+    master_ordinal = xm.is_master_ordinal()
 
     def train_epoch(train_loader):
         model.train()
@@ -187,9 +187,10 @@ def train(args):
             xm.optimizer_step(optimizer)
 
             tracker.add(train_loss=loss, train_acc=acc)
-            if indx % args.log_freq == 0 and master_ordinal:
+            if master_ordinal and indx % args.log_freq == 0:
                 tracker.print(indx/len(train_loader))
-        tracker.print(1)
+        if master_ordinal:
+            tracker.print(1)
 
     def val(val_loader):
         model.eval()
@@ -202,10 +203,11 @@ def train(args):
             acc = pred_class.eq(target.view_as(pred_class)).sum() / img.shape[0]
 
             tracker.add(val_loss=loss, val_acc=acc)
-            if indx % args.log_freq == 0 and master_ordinal:
+            if master_ordinal and indx % args.log_freq == 0:
                 tracker.print(indx/len(val_loader), msg="")
         metrics = tracker.get(True)
-        tracker.print(1, msg=tracker.msg(metrics))
+        if master_ordinal:
+            tracker.print(1, msg=tracker.msg(metrics))
         return metrics
 
     train_device_loader = pl.MpDeviceLoader(loader["train"], device)
@@ -218,7 +220,7 @@ def train(args):
         train_epoch(train_device_loader)
         if epoch % args.val_freq == 0 or epoch == args.n_epochs - 1:
             metrics = val(val_device_loader)
-            if metrics["val_acc"] > best_val and master_ordinal:
+            if master_ordinal and metrics["val_acc"] > best_val:
                 print(
                     "\x1b[33m"
                     + f"val acc improved from {round(best_val, 5)} to {round(metrics['val_acc'], 5)}"
