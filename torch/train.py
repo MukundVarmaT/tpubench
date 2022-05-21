@@ -1,5 +1,3 @@
-from doctest import master
-from re import L
 from torchvision import transforms, datasets
 import torch_xla.core.xla_model as xm
 from torch.utils.data import DataLoader, DistributedSampler
@@ -146,12 +144,13 @@ class RunningMeter:
         return "".join(["[{}] {:.5f} ".format(key, value) for key, value in avg_metrics.items()])
 
     def print(self, progress=0, bar_len=20, msg=None):
+        msg = self.msg() if msg == None else msg
         msg = msg.ljust(50)
         block = int(round(bar_len * progress))
         text = "\rprogress: [{}] {}% {}".format(
             "\x1b[32m" + "=" * (block - 1) + ">" + "\033[0m" + "-" * (bar_len - block),
             round(progress * 100, 2),
-            self.msg() if msg == None else msg,
+            msg,
         )
         print(text, end="")
         if progress == 1:
@@ -167,7 +166,7 @@ def train(args):
     device = xm.xla_device()
     model = get_model(args.net, dataset["n_class"]).to(device)
     optimizer = get_optimizer(args.opt, model, args.lr)
-    lr_scheduler = get_lr_scheduler(args.lr_sched, optimizer, args.epochs)
+    lr_scheduler = get_lr_scheduler(args.lr_sched, optimizer, args.n_epochs)
     criterion = nn.CrossEntropyLoss()
     tracker = RunningMeter()
     master_ordinal = xm.get_ordinal() == 0
@@ -183,9 +182,9 @@ def train(args):
             loss.backward()
             xm.optimizer_step(optimizer)
 
-            tracker.add({"train_loss": loss})
+            tracker.add(train_loss=loss)
             if indx % args.log_freq and master_ordinal:
-                tracker.print(indx)
+                tracker.print(indx/len(train_loader))
         tracker.print(1)
 
     def val(val_loader):
@@ -198,9 +197,9 @@ def train(args):
             pred_class = output.argmax(dim=1)
             acc = pred_class.eq(target.view_as(pred_class)).sum() / img.shape[0]
 
-            tracker.add({"val_loss": loss, "val_acc": acc})
+            tracker.add(val_loss=loss, val_acc=acc)
             if indx % args.log_freq and master_ordinal:
-                tracker.print(indx, msg="")
+                tracker.print(indx/len(val_loader), msg="")
         metrics = tracker.get(True)
         tracker.print(1, msg=tracker.msg(metrics))
         return metrics
@@ -213,7 +212,7 @@ def train(args):
             print(f"epoch: {epoch}")
             print("---------------")
         train_epoch(train_device_loader)
-        if epoch % args.val_freq:
+        if epoch % args.val_freq or epoch == args.n_epochs - 1:
             metrics = val(val_device_loader)
             if metrics["val_acc"] > best_val and master_ordinal:
                 print(
@@ -268,8 +267,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lr_sched", type=str, default="cosine", help="lr scheduler name [d: cosine]"
     )
-    parser.add_argument("--eval_freq", type=int, default=10, help="eval frequency [d: 10]")
+    parser.add_argument("--val_freq", type=int, default=10, help="validation frequency [d: 10]")
     parser.add_argument("--log_freq", type=int, default=100, help="logging frequency [d: 100]")
     args = parser.parse_args()
-
+    
+    os.makedirs(args.out_dir, exist_ok=True)
     xmp.spawn(_mp_fn, args=(args,), nprocs=args.n_cores)
